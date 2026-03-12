@@ -116,7 +116,9 @@ def _discover_token_from_browser(timeout_seconds: int, headless: bool, session: 
         from playwright.sync_api import sync_playwright
     except ImportError as exc:  # pragma: no cover - exercised manually
         raise TokenDiscoveryError(
-            'Browser-based token discovery requires Playwright. Install dependencies with '            '"pip install -r requirements.txt" and then run "python -m playwright install chromium".'
+            'Browser-based token discovery requires Playwright. '
+            'Install dependencies with "pip install -r requirements.txt" '
+            'and then run "python -m playwright install chromium".'
         ) from exc
 
     with sync_playwright() as playwright:
@@ -260,8 +262,8 @@ def render_batch_script(
         lines.append(f'REM {index}. {sanitize_comment(room.get("title", ""))}')
         command = _build_command_parts(archive_script, room['id'], config_file, python_command)
         rendered_parts = []
-        for index, part in enumerate(command):
-            if index >= len(python_parts) or not part or any(character.isspace() for character in part) or '"' in part:
+        for command_index, part in enumerate(command):
+            if command_index >= len(python_parts) or not part or any(character.isspace() for character in part) or '"' in part:
                 rendered_parts.append(_quote_batch_value(part))
             else:
                 rendered_parts.append(part)
