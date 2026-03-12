@@ -172,6 +172,34 @@ def sort_rooms(rooms: Sequence[Mapping[str, str]]) -> list[Mapping[str, str]]:
     return sorted(rooms, key=lambda room: room.get('title', '').lower())
 
 
+def filter_rooms(
+    rooms: Sequence[Mapping[str, str]],
+    *,
+    match: str | None = None,
+    skip_direct: bool = False,
+    skip_group: bool = False,
+    limit: int | None = None,
+) -> list[Mapping[str, str]]:
+    if limit is not None and limit < 0:
+        raise ValueError('limit must be zero or greater')
+
+    filtered_rooms: list[Mapping[str, str]] = []
+    match_text = match.casefold() if match else None
+    for room in sort_rooms(rooms):
+        room_type = room.get('type', '').casefold()
+        if skip_direct and room_type == 'direct':
+            continue
+        if skip_group and room_type == 'group':
+            continue
+        if match_text and match_text not in room.get('title', '').casefold():
+            continue
+        filtered_rooms.append(room)
+
+    if limit is not None:
+        return filtered_rooms[:limit]
+    return filtered_rooms
+
+
 def fetch_rooms(token: str, session: requests.Session | None = None) -> list[dict[str, str]]:
     client = session or requests.Session()
     response = client.get(
