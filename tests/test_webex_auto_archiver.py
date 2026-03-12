@@ -99,7 +99,7 @@ class CliOptionsTests(unittest.TestCase):
         self.assertEqual(args.limit, 3)
 
     def test_windows_launcher_routes_to_python_scripts(self):
-        launcher_path = Path('/home/runner/work/Webex-Auto-Archiver/Webex-Auto-Archiver/webex-auto-archiver.cmd')
+        launcher_path = Path(__file__).resolve().parents[1] / 'webex-auto-archiver.cmd'
         launcher_text = launcher_path.read_text(encoding='utf-8')
         self.assertIn('generate_space_batch.py', launcher_text)
         self.assertIn('download_everything.py', launcher_text)
