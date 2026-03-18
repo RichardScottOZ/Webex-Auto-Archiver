@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from webex_auto_archiver import fetch_rooms, filter_rooms, resolve_access_token, write_batch_scripts
+from webex_auto_archiver import fetch_rooms, filter_rooms, parse_date_arg, resolve_access_token, write_batch_scripts
 
 
 def non_negative_int(value: str) -> int:
@@ -47,6 +47,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--skip-direct', action='store_true', help='Skip direct-message rooms.')
     parser.add_argument('--skip-group', action='store_true', help='Skip group rooms and only include direct messages.')
     parser.add_argument('--limit', type=non_negative_int, help='Limit how many matching rooms are included.')
+    parser.add_argument(
+        '--since',
+        metavar='DATE',
+        help=(
+            'Only include rooms with activity at or after DATE. '
+            'Accepts "yesterday", "today", relative values like "7d", "2w", "1m", '
+            'or an ISO 8601 date/datetime (e.g. "2024-01-15").'
+        ),
+    )
+    parser.add_argument(
+        '--before',
+        metavar='DATE',
+        help=(
+            'Only include rooms with activity strictly before DATE. '
+            'Accepts the same formats as --since.'
+        ),
+    )
     return parser
 
 
@@ -65,6 +82,8 @@ def main() -> int:
         skip_direct=args.skip_direct,
         skip_group=args.skip_group,
         limit=args.limit,
+        since=parse_date_arg(args.since) if args.since else None,
+        before=parse_date_arg(args.before) if args.before else None,
     )
     shell_path, batch_path = write_batch_scripts(
         filtered_rooms,

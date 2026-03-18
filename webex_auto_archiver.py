@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping, Sequence
 
@@ -168,6 +169,67 @@ def resolve_access_token(
     )
 
 
+def parse_date_arg(value: str) -> datetime:
+    """Parse a flexible date/time string into a UTC-aware :class:`~datetime.datetime`.
+
+    Accepted formats:
+
+    * ``yesterday`` – start of yesterday (midnight UTC).
+    * ``today`` – start of today (midnight UTC).
+    * Relative values: ``7d``, ``2w``, ``1m`` (days, weeks, or months ago).
+      Months are approximated as 30 calendar days.
+    * ISO 8601 date: ``2024-01-15``.
+    * ISO 8601 datetime: ``2024-01-15T10:30:00``.
+
+    :raises ValueError: When the format cannot be recognised.
+    """
+    stripped = value.strip()
+    lower = stripped.lower()
+    now = datetime.now(tz=timezone.utc)
+
+    if lower == 'yesterday':
+        yesterday = (now - timedelta(days=1)).date()
+        return datetime(yesterday.year, yesterday.month, yesterday.day, tzinfo=timezone.utc)
+
+    if lower == 'today':
+        today = now.date()
+        return datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+
+    rel_match = re.fullmatch(r'(\d+)\s*(d|day|days|w|week|weeks|m|month|months)', lower)
+    if rel_match:
+        count = int(rel_match.group(1))
+        unit = rel_match.group(2)[0]  # 'd', 'w', or 'm'
+        if unit == 'd':
+            return now - timedelta(days=count)
+        if unit == 'w':
+            return now - timedelta(weeks=count)
+        return now - timedelta(days=count * 30)
+
+    for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M', '%Y-%m-%d'):
+        try:
+            dt = datetime.strptime(stripped, fmt)
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+    raise ValueError(
+        f'Unrecognised date value {stripped!r}. '
+        'Use "yesterday", "today", a relative value such as "7d", "2w" or "1m" '
+        '(months are approximated as 30 days), '
+        'or an ISO 8601 date/datetime (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS).'
+    )
+
+
+def _parse_webex_datetime(value: str) -> datetime | None:
+    """Parse a Webex API ISO 8601 datetime string into a UTC-aware datetime."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+
+
 def sort_rooms(rooms: Sequence[Mapping[str, str]]) -> list[Mapping[str, str]]:
     return sorted(rooms, key=lambda room: room.get('title', '').lower())
 
@@ -179,9 +241,27 @@ def filter_rooms(
     skip_direct: bool = False,
     skip_group: bool = False,
     limit: int | None = None,
+    since: datetime | None = None,
+    before: datetime | None = None,
 ) -> list[Mapping[str, str]]:
+    """Return a filtered and sorted subset of *rooms*.
+
+    :param since: Only include rooms whose ``lastActivity`` is at or after this
+        datetime.  Rooms with no ``lastActivity`` are excluded when this filter
+        is active.
+    :param before: Only include rooms whose ``lastActivity`` is strictly before
+        this datetime.  Rooms with no ``lastActivity`` are excluded when this
+        filter is active.
+    """
     if limit is not None and limit < 0:
         raise ValueError('limit must be zero or greater')
+
+    def _ensure_utc(dt: datetime) -> datetime:
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+    since_utc = _ensure_utc(since) if since is not None else None
+    before_utc = _ensure_utc(before) if before is not None else None
+    date_filter_active = since_utc is not None or before_utc is not None
 
     filtered_rooms: list[Mapping[str, str]] = []
     match_text = match.casefold() if match else None
@@ -193,6 +273,14 @@ def filter_rooms(
             continue
         if match_text and match_text not in room.get('title', '').casefold():
             continue
+        if date_filter_active:
+            last_activity = _parse_webex_datetime(room.get('lastActivity', ''))
+            if last_activity is None:
+                continue
+            if since_utc is not None and last_activity < since_utc:
+                continue
+            if before_utc is not None and last_activity >= before_utc:
+                continue
         filtered_rooms.append(room)
 
     if limit is not None:
@@ -212,6 +300,83 @@ def fetch_rooms(token: str, session: requests.Session | None = None) -> list[dic
     )
     response.raise_for_status()
     return [dict(room) for room in sort_rooms(response.json().get('items', []))]
+
+
+def fetch_messages(
+    token: str,
+    room_id: str,
+    *,
+    since: datetime | None = None,
+    before: datetime | None = None,
+    max_items: int | None = None,
+    session: requests.Session | None = None,
+) -> list[dict]:
+    """Fetch messages from a Webex room, optionally within a date range.
+
+    The Webex API returns messages in reverse-chronological order (newest
+    first).  This function reverses the result so that messages are returned
+    in chronological order (oldest first).
+
+    :param token: Webex personal access token.
+    :param room_id: The ID of the Webex room/space to retrieve messages from.
+    :param since: Only return messages created at or after this datetime.
+    :param before: Only return messages created strictly before this datetime.
+    :param max_items: Maximum total number of messages to return.
+    :param session: Optional :class:`requests.Session` to reuse for HTTP calls.
+    :returns: List of message dicts in chronological order (oldest first).
+    """
+    def _ensure_utc(dt: datetime) -> datetime:
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+    since_utc = _ensure_utc(since) if since is not None else None
+    before_utc = _ensure_utc(before) if before is not None else None
+
+    client = session or requests.Session()
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json',
+    }
+
+    messages: list[dict] = []
+    page_before: datetime | None = before_utc
+
+    while True:
+        params: dict = {'roomId': room_id, 'max': 200}
+        if page_before is not None:
+            params['before'] = page_before.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+        response = client.get(
+            'https://webexapis.com/v1/messages',
+            headers=headers,
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        batch = response.json().get('items', [])
+        if not batch:
+            break
+
+        done = False
+        for message in batch:
+            created_dt = _parse_webex_datetime(message.get('created', ''))
+            if created_dt is not None and since_utc is not None and created_dt < since_utc:
+                done = True
+                break
+            messages.append(message)
+            if max_items is not None and len(messages) >= max_items:
+                done = True
+                break
+
+        if done:
+            break
+
+        oldest_dt = _parse_webex_datetime(batch[-1].get('created', ''))
+        if oldest_dt is None:
+            break
+        page_before = oldest_dt
+
+    messages.reverse()
+    return messages
 
 
 def sanitize_comment(text: str) -> str:
